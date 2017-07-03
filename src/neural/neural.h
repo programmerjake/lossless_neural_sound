@@ -36,7 +36,7 @@ namespace lossless_neural_sound
 {
 namespace neural
 {
-typedef double Number_type;
+typedef float Number_type;
 constexpr std::size_t number_type_write_precision = 7;
 
 constexpr Number_type operator""_n(long double v) noexcept
@@ -369,50 +369,69 @@ struct Neural_net
     {
         return evaluate(input, input_to_hidden_weights, hidden_to_output_weights);
     }
-    struct Learn_results
+    struct Learn_step
     {
-        Number_type initial_squared_error;
+        Number_type squared_error;
 
-        // derivative of initial_squared_error with respect to each element of
+        // derivative of squared_error with respect to each element of
+        // input_to_hidden_weights
+        Input_to_hidden_weights input_to_hidden_weight_derivatives;
+
+        // derivative of squared_error with respect to each element of
         // hidden_to_output_weights
         Hidden_to_output_weights hidden_to_output_weight_derivatives;
 
-        // derivative of initial_squared_error with respect to each element of
-        // input_to_hidden_weights
-        Input_to_hidden_weights input_to_hidden_weight_derivatives;
+        constexpr Learn_step() noexcept : squared_error(0),
+                                          input_to_hidden_weight_derivatives(0),
+                                          hidden_to_output_weight_derivatives(0)
+        {
+        }
+        constexpr Learn_step &operator+=(const Learn_step &rt) noexcept
+        {
+            squared_error += rt.squared_error;
+            input_to_hidden_weight_derivatives += rt.input_to_hidden_weight_derivatives;
+            hidden_to_output_weight_derivatives += rt.hidden_to_output_weight_derivatives;
+            return *this;
+        }
+        constexpr Learn_step operator+(const Learn_step &rt) const noexcept
+        {
+            Learn_step retval = *this;
+            retval += rt;
+            return retval;
+        }
     };
-    constexpr Learn_results learn(const Input_vector &input,
-                                  const Output_vector &correct_output,
-                                  Number_type step_size) noexcept
+    constexpr Learn_step get_learn_step(const Input_vector &input,
+                                        const Output_vector &correct_output) const noexcept
     {
-        Learn_results learn_results{};
+        Learn_step retval;
         Hidden_vector hidden_input = input * input_to_hidden_weights;
         Hidden_vector hidden = transfer_function(hidden_input);
         Output_vector output_input = hidden * hidden_to_output_weights;
         Output_vector output = transfer_function(output_input);
         Output_vector output_difference = output - correct_output;
-        learn_results.initial_squared_error = output_difference * output_difference.get_transpose();
+        retval.squared_error = output_difference * output_difference.get_transpose();
 
         Output_vector dtf_output = transfer_function<1>(output_input);
         Output_vector dtf_output_times_output_difference_times_2 =
             2_n * dtf_output.elementwise_product(output_difference);
-        learn_results.hidden_to_output_weight_derivatives =
+        retval.hidden_to_output_weight_derivatives =
             hidden.get_transpose() * dtf_output_times_output_difference_times_2;
-        learn_results.input_to_hidden_weight_derivatives =
+        retval.input_to_hidden_weight_derivatives =
             input.get_transpose()
             * transfer_function<1>(hidden_input)
                   .elementwise_product(
                       (hidden_to_output_weights
                        * dtf_output_times_output_difference_times_2.get_transpose())
                           .get_transpose());
-        input_to_hidden_weights -= step_size * learn_results.input_to_hidden_weight_derivatives;
-        hidden_to_output_weights -= step_size * learn_results.hidden_to_output_weight_derivatives;
-        return learn_results;
+        return retval;
+    }
+    constexpr void apply_learn_step(const Learn_step &learn_step, Number_type step_size) noexcept
+    {
+        input_to_hidden_weights -= step_size * learn_step.input_to_hidden_weight_derivatives;
+        hidden_to_output_weights -= step_size * learn_step.hidden_to_output_weight_derivatives;
     }
 };
 }
 }
 
 #endif // NEURAL_NEURAL_H_
-
-

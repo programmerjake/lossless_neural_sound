@@ -22,49 +22,95 @@
  */
 #include <iostream>
 #include "neural/neural.h"
+#include "util/scheduler.h"
+#include "util/constexpr_array.h"
 #include <random>
 #include <cmath>
+#include <mutex>
 #include <vector>
+#include <chrono>
 
 int main(int argc, char **argv)
 {
     using namespace lossless_neural_sound;
-    static constexpr std::size_t input_size = 20;
-    static constexpr std::size_t output_size = 20;
+    util::Scheduler scheduler;
+    static constexpr std::size_t input_size = 64;
+    static constexpr std::size_t output_size = 50;
     typedef neural::Neural_net<input_size, output_size> Neural_net;
     Neural_net neural_net;
-    std::default_random_engine re;
-    neural_net.initialize_to_random(re);
-    constexpr std::size_t learn_step_count = 10000;
-    for(std::size_t learn_step = 0; learn_step <= learn_step_count; learn_step++)
     {
-        for(std::size_t input_index = 0; input_index < output_size; input_index++)
+        std::default_random_engine re;
+        neural_net.initialize_to_random(re);
+    }
+    constexpr std::size_t learn_step_count = 10000;
+    constexpr std::size_t input_count = output_size;
+    std::size_t input_partitions = scheduler.get_thread_count() * 2;
+    std::vector<std::future<void>> futures;
+    futures.resize(input_partitions);
+    for(std::size_t learn_step_index = 0; learn_step_index <= learn_step_count; learn_step_index++)
+    {
+        bool display = learn_step_index % (learn_step_count / 10) == 0;
+        Neural_net::Learn_step total_learn_step;
+        std::mutex total_learn_step_lock;
+        for(std::size_t input_partition = 0; input_partition < input_partitions; input_partition++)
         {
-            re.seed(input_index + 1);
-            re.discard(20);
-            Neural_net::Input_vector input(0);
-            for(std::size_t i = 0; i < input_size; i++)
-                input[i] = std::uniform_real_distribution<neural::Number_type>(-1, 1)(re);
-            bool display = learn_step % (learn_step_count / 10) == 0;
-            neural::Number_type step_size = 0.1;
-            if(display)
+            auto task = [&, input_partition]() -> void
             {
-                std::cout << "input:\n" << input;
-                auto output = neural_net.evaluate(input);
-                std::cout << "output:\n" << output;
-            }
-            Neural_net::Output_vector correct_output(0);
-            correct_output[input_index] = 0.25;
-            auto learn_results =
-                neural_net.learn(input, correct_output, step_size);
-            if(display)
-            {
-                std::cout << "step_size: " << step_size
-                          << "\n";
-                std::cout << "initial_squared_error: " << learn_results.initial_squared_error
-                          << "\n";
-                std::cout << std::endl;
-            }
+                std::size_t start_input_index = input_partition * input_count / input_partitions;
+                std::size_t end_input_index =
+                    (input_partition + 1) * input_count / input_partitions;
+                Neural_net::Learn_step partition_total_learn_step;
+                for(std::size_t input_index = start_input_index; input_index < end_input_index;
+                    input_index++)
+                {
+                    std::default_random_engine re(input_index + 1);
+                    re.discard(20);
+                    Neural_net::Input_vector input(0);
+                    for(std::size_t i = 0; i < input_size; i++)
+                        input[i] = std::uniform_real_distribution<neural::Number_type>(-1, 1)(re);
+                    Neural_net::Output_vector correct_output(0);
+                    correct_output[input_index % output_size] = 0.25;
+                    partition_total_learn_step += neural_net.get_learn_step(input, correct_output);
+                }
+                std::unique_lock<std::mutex> lock(total_learn_step_lock);
+                total_learn_step += partition_total_learn_step;
+            };
+            futures[input_partition] = scheduler.queue_task(task);
+        }
+        for(auto &future : futures)
+            future.get();
+        neural_net.apply_learn_step(
+            total_learn_step,
+            static_cast<neural::Number_type>(learn_step_count - learn_step_index) / learn_step_count
+                / input_count);
+        if(display)
+        {
+            std::cout << "total squared error: " << total_learn_step.squared_error << "\n";
+            std::cout << "rms error per output: "
+                      << std::sqrt(total_learn_step.squared_error / input_count / output_size)
+                      << "\n";
+            std::cout << std::endl;
         }
     }
+    auto elapsed_time = std::chrono::steady_clock::duration::zero();
+    auto target_duration = std::chrono::seconds(2);
+    std::size_t evaluate_count = 1;
+    while(elapsed_time < target_duration)
+    {
+        evaluate_count *= 2;
+        auto start_time = std::chrono::steady_clock::now();
+        for(std::size_t i = 0; i < evaluate_count; i++)
+        {
+            Neural_net::Input_vector input(0);
+            asm volatile("" ::"r"(&input) : "memory");
+            auto result = neural_net.evaluate(input);
+            asm volatile("" ::"r"(&result) : "memory");
+        }
+        auto end_time = std::chrono::steady_clock::now();
+        elapsed_time = end_time - start_time;
+    }
+    std::cout << evaluate_count
+                     / std::chrono::duration_cast<std::chrono::duration<double>>(elapsed_time)
+                           .count()
+              << " evaluations per second" << std::endl;
 }

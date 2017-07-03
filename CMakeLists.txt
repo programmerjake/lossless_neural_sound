@@ -25,5 +25,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 project(lossless_neural_sound CXX)
 add_compile_options(-Wall -ftemplate-depth=1024)
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 add_subdirectory(src)
 

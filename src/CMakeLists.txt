@@ -23,5 +23,5 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR})
 add_subdirectory(neural)
 add_subdirectory(util)
 add_executable(lossless_neural_sound main.cpp)
-target_link_libraries(lossless_neural_sound neural util)
+target_link_libraries(lossless_neural_sound neural util Threads::Threads)
 

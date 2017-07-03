@@ -23,27 +23,48 @@
 #include <iostream>
 #include "neural/neural.h"
 #include <random>
+#include <cmath>
+#include <vector>
 
 int main(int argc, char **argv)
 {
     using namespace lossless_neural_sound;
-    static constexpr std::size_t input_size = 4;
-    static constexpr std::size_t output_size = 2;
+    static constexpr std::size_t input_size = 20;
+    static constexpr std::size_t output_size = 20;
     typedef neural::Neural_net<input_size, output_size> Neural_net;
     Neural_net neural_net;
     std::default_random_engine re;
     neural_net.initialize_to_random(re);
-    for(std::size_t count = 0; count < 10; count++)
+    constexpr std::size_t learn_step_count = 10000;
+    for(std::size_t learn_step = 0; learn_step <= learn_step_count; learn_step++)
     {
-        re.seed(count);
-        re.discard(20);
-        Neural_net::Input_vector input;
-        for(std::size_t i = 0; i < input_size; i++)
+        for(std::size_t input_index = 0; input_index < output_size; input_index++)
         {
-            input[i] = std::uniform_real_distribution<neural::Number_type>(-1, 1)(re);
+            re.seed(input_index + 1);
+            re.discard(20);
+            Neural_net::Input_vector input(0);
+            for(std::size_t i = 0; i < input_size; i++)
+                input[i] = std::uniform_real_distribution<neural::Number_type>(-1, 1)(re);
+            bool display = learn_step % (learn_step_count / 10) == 0;
+            neural::Number_type step_size = 0.1;
+            if(display)
+            {
+                std::cout << "input:\n" << input;
+                auto output = neural_net.evaluate(input);
+                std::cout << "output:\n" << output;
+            }
+            Neural_net::Output_vector correct_output(0);
+            correct_output[input_index] = 0.25;
+            auto learn_results =
+                neural_net.learn(input, correct_output, step_size);
+            if(display)
+            {
+                std::cout << "step_size: " << step_size
+                          << "\n";
+                std::cout << "initial_squared_error: " << learn_results.initial_squared_error
+                          << "\n";
+                std::cout << std::endl;
+            }
         }
-        std::cout << "input:\n" << input;
-        auto output = neural_net.evaluate(input);
-        std::cout << "output:\n" << output << std::endl;
     }
 }

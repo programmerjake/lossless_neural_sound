@@ -29,6 +29,7 @@
 #include <utility>
 #include <iterator>
 #include <stdexcept>
+#include <cassert>
 
 namespace lossless_neural_sound
 {
@@ -109,27 +110,29 @@ public:
     }
     constexpr T &operator[](std::size_t index) noexcept
     {
+        assert(index < N);
         return get_values_pointer()[index];
     }
     constexpr const T &operator[](std::size_t index) const noexcept
     {
+        assert(index < N);
         return get_values_pointer()[index];
     }
     constexpr T &front() noexcept
     {
-        return get_values_pointer()[0];
+        return (*this)[0];
     }
     constexpr const T &front() const noexcept
     {
-        return get_values_pointer()[0];
+        return (*this)[0];
     }
     constexpr T &back() noexcept
     {
-        return get_values_pointer()[N - 1];
+        return (*this)[N - 1];
     }
     constexpr const T &back() const noexcept
     {
-        return get_values_pointer()[N - 1];
+        return (*this)[N - 1];
     }
     constexpr T *data() noexcept
     {

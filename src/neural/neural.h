@@ -36,7 +36,7 @@ namespace lossless_neural_sound
 {
 namespace neural
 {
-typedef float Number_type;
+typedef double Number_type;
 constexpr std::size_t number_type_write_precision = 7;
 
 constexpr Number_type operator""_n(long double v) noexcept
@@ -83,81 +83,81 @@ constexpr Number_type transfer_function(Number_type v) noexcept
     static_assert(Derivative_count <= 2, "not implemented for higher derivatives");
 }
 
-template <std::size_t X, std::size_t Y>
+template <std::size_t Width, std::size_t Height, typename T>
 class Matrix
 {
 private:
-    util::Constexpr_array<util::Constexpr_array<Number_type, X>, Y> values;
+    util::Constexpr_array<util::Constexpr_array<T, Width>, Height> values;
 
 public:
-    static constexpr std::size_t width = X;
-    static constexpr std::size_t height = Y;
-    constexpr Number_type &operator()(std::size_t x, std::size_t y) noexcept
+    static constexpr std::size_t width = Width;
+    static constexpr std::size_t height = Height;
+    constexpr T &operator()(std::size_t y, std::size_t x) noexcept
     {
         return values[y][x];
     }
-    constexpr const Number_type &operator()(std::size_t x, std::size_t y) const noexcept
+    constexpr const T &operator()(std::size_t y, std::size_t x) const noexcept
     {
         return values[y][x];
     }
-    template <typename T = void>
+    template <typename T2 = void>
     constexpr
-        typename std::enable_if<std::is_void<T>::value && (X == 1) != (Y == 1), Number_type>::type &
+        typename std::enable_if<std::is_void<T2>::value && (Width == 1) != (Height == 1), T>::type &
         operator[](std::size_t index) noexcept
     {
-        if(X == 1)
+        if(Height == 1)
             return (*this)(0, index);
         return (*this)(index, 0);
     }
-    template <typename T = void>
-    constexpr const typename std::enable_if<std::is_void<T>::value && (X == 1) != (Y == 1),
-                                            Number_type>::type &
+    template <typename T2 = void>
+    constexpr const typename std::enable_if<std::is_void<T2>::value
+                                                && (Width == 1) != (Height == 1),
+                                            T>::type &
         operator[](std::size_t index) const noexcept
     {
-        if(X == 1)
+        if(Height == 1)
             return (*this)(0, index);
         return (*this)(index, 0);
     }
     constexpr Matrix() noexcept : values{}
     {
     }
-    template <typename T = void>
-    constexpr Matrix(typename std::enable_if<std::is_void<T>::value && X == 1 && Y == 1,
-                                             Number_type>::type v) noexcept : values{}
+    constexpr Matrix(T v) noexcept : values{}
     {
-        values[0][0] = v;
+        for(std::size_t y = 0; y < Height; y++)
+            for(std::size_t x = 0; x < Width; x++)
+                (*this)(y, x) = v;
     }
-    template <typename T = void>
-    operator typename std::enable_if<std::is_void<T>::value && X == 1 && Y == 1,
-                                     Number_type>::type() const noexcept
+    template <typename T2 = void>
+    operator typename std::enable_if<std::is_void<T2>::value && Width == 1 && Height == 1,
+                                     T>::type() const noexcept
     {
         return values[0][0];
     }
     static constexpr Matrix zero() noexcept
     {
-        Matrix retval;
-        for(std::size_t y = 0; y < Y; y++)
-            for(std::size_t x = 0; x < X; x++)
-                retval(x, y) = 0_n;
-        return retval;
+        return Matrix(0_n);
     }
     static constexpr Matrix identity() noexcept
     {
         Matrix retval = zero();
-        for(std::size_t i = 0; i < X && i < Y; i++)
-            retval(i, i) = 0_n;
+        for(std::size_t i = 0; i < Width && i < Height; i++)
+            retval(i, i) = 1_n;
         return retval;
     }
-    template <std::size_t Y2>
-    constexpr Matrix<X, Y2> operator*(const Matrix<Y, Y2> &rt) const noexcept
+    template <std::size_t Result_width,
+              typename Result_type = decltype(std::declval<T>() * std::declval<T>()
+                                              + std::declval<T>() * std::declval<T>())>
+    constexpr Matrix<Result_width, Height, Result_type> operator*(
+        const Matrix<Result_width, Width, T> &rt) const noexcept
     {
-        Matrix<X, Y2> retval;
-        for(std::size_t j = 0; j < Y2; j++)
+        Matrix<Result_width, Height, Result_type> retval;
+        for(std::size_t i = 0; i < Height; i++)
         {
-            for(std::size_t i = 0; i < X; i++)
+            for(std::size_t j = 0; j < Result_width; j++)
             {
-                Number_type value = (*this)(i, 0) * rt(0, j);
-                for(std::size_t k = 1; k < Y; k++)
+                Result_type value = (*this)(i, 0) * rt(0, j);
+                for(std::size_t k = 1; k < Width; k++)
                 {
                     value += (*this)(i, k) * rt(k, j);
                 }
@@ -166,80 +166,142 @@ public:
         }
         return retval;
     }
+    template <typename Result_type = decltype(std::declval<T>() * std::declval<T>())>
+    constexpr Matrix<Width, Height, Result_type> operator*(T rt) const noexcept
+    {
+        Matrix<Width, Height, Result_type> retval;
+        for(std::size_t i = 0; i < Height; i++)
+            for(std::size_t j = 0; j < Width; j++)
+                retval(i, j) = (*this)(i, j) * rt;
+        return retval;
+    }
+    template <typename Result_type = decltype(std::declval<T>() * std::declval<T>())>
+    friend constexpr Matrix<Width, Height, Result_type> operator*(T l, const Matrix &r) noexcept
+    {
+        Matrix<Width, Height, Result_type> retval;
+        for(std::size_t i = 0; i < Height; i++)
+            for(std::size_t j = 0; j < Width; j++)
+                retval(i, j) = l * r(i, j);
+        return retval;
+    }
+    template <typename T2, typename Result_type = decltype(std::declval<T>() * std::declval<T2>())>
+    constexpr Matrix<Width, Height, Result_type> elementwise_product(
+        const Matrix<Width, Height, T2> &rt) const noexcept
+    {
+        Matrix<Width, Height, Result_type> retval;
+        for(std::size_t i = 0; i < Height; i++)
+            for(std::size_t j = 0; j < Width; j++)
+                retval(i, j) = (*this)(i, j) * rt(i, j);
+        return retval;
+    }
+    template <typename T2, typename Result_type = decltype(std::declval<T>() + std::declval<T2>())>
+    constexpr Matrix<Width, Height, Result_type> operator+(
+        const Matrix<Width, Height, T2> &rt) const noexcept
+    {
+        Matrix<Width, Height, Result_type> retval;
+        for(std::size_t i = 0; i < Height; i++)
+            for(std::size_t j = 0; j < Width; j++)
+                retval(i, j) = (*this)(i, j) + rt(i, j);
+        return retval;
+    }
+    template <typename T2, typename Result_type = decltype(std::declval<T>() - std::declval<T2>())>
+    constexpr Matrix<Width, Height, Result_type> operator-(
+        const Matrix<Width, Height, T2> &rt) const noexcept
+    {
+        Matrix<Width, Height, Result_type> retval;
+        for(std::size_t i = 0; i < Height; i++)
+            for(std::size_t j = 0; j < Width; j++)
+                retval(i, j) = (*this)(i, j) - rt(i, j);
+        return retval;
+    }
     template <typename Retval = Matrix>
     constexpr typename std::enable_if<std::is_same<Retval, Matrix>::value
-                                          && Retval::width == Retval::height,
+                                          && std::is_same<decltype(std::declval<Retval>()
+                                                                   * std::declval<Retval>()),
+                                                          Matrix>::value,
                                       Matrix>::type &
         operator*=(const Matrix &rt) noexcept
     {
         *this = *this * rt;
         return *this;
     }
-    constexpr Matrix &operator-=(const Matrix &rt) noexcept
+    template <typename Retval = Matrix>
+    constexpr typename std::enable_if<std::is_same<Retval, Matrix>::value
+                                          && std::is_same<decltype(std::declval<Retval>()
+                                                                   * std::declval<T>()),
+                                                          Matrix>::value,
+                                      Matrix>::type &
+        operator*=(T rt) noexcept
     {
-        for(std::size_t y = 0; y < Y; y++)
-            for(std::size_t x = 0; x < X; x++)
-                (*this)(x, y) -= rt(x, y);
+        *this = *this * rt;
         return *this;
     }
-    constexpr Matrix<Y, X> get_transpose() const noexcept
+    template <typename Retval = Matrix>
+    constexpr typename std::enable_if<std::is_same<Retval, Matrix>::value
+                                          && std::is_same<decltype(std::declval<Retval>()
+                                                                   - std::declval<Retval>()),
+                                                          Matrix>::value,
+                                      Matrix>::type &
+        operator-=(const Matrix &rt) noexcept
     {
-        Matrix<Y, X> retval;
-        for(std::size_t y = 0; y < Y; y++)
-            for(std::size_t x = 0; x < X; x++)
-                retval(y, x) = (*this)(x, y);
+        *this = *this - rt;
+        return *this;
+    }
+    template <typename Retval = Matrix>
+    constexpr typename std::enable_if<std::is_same<Retval, Matrix>::value
+                                          && std::is_same<decltype(std::declval<Retval>()
+                                                                   + std::declval<Retval>()),
+                                                          Matrix>::value,
+                                      Matrix>::type &
+        operator+=(const Matrix &rt) noexcept
+    {
+        *this = *this + rt;
+        return *this;
+    }
+    constexpr Matrix<Height, Width, T> get_transpose() const noexcept
+    {
+        Matrix<Height, Width, T> retval;
+        for(std::size_t i = 0; i < Height; i++)
+            for(std::size_t j = 0; j < Width; j++)
+                retval(j, i) = (*this)(i, j);
         return retval;
+    }
+    friend std::ostream &operator<<(std::ostream &os, const Matrix &v)
+    {
+        for(std::size_t i = 0; i < Height; i++)
+        {
+            os << "| ";
+            for(std::size_t j = 0; j < Width; j++)
+            {
+                os << v(i, j);
+                os << ' ';
+            }
+            os << "|\n";
+        }
+        return os;
     }
 };
 
-template <std::size_t X, std::size_t Y>
-constexpr std::size_t Matrix<X, Y>::width;
+template <std::size_t Width, std::size_t Height, typename T>
+constexpr std::size_t Matrix<Width, Height, T>::width;
 
-template <std::size_t X, std::size_t Y>
-constexpr std::size_t Matrix<X, Y>::height;
+template <std::size_t Width, std::size_t Height, typename T>
+constexpr std::size_t Matrix<Width, Height, T>::height;
 
-template <std::size_t X, std::size_t Y>
-std::ostream &operator<<(std::ostream &os, const Matrix<X, Y> &v)
+template <std::size_t N, typename T>
+using Row_vector = Matrix<N, 1, T>;
+
+template <std::size_t N, typename T>
+using Column_vector = Matrix<1, N, T>;
+
+template <unsigned Derivative_count = 0, std::size_t Width, std::size_t Height, typename T>
+constexpr Matrix<Width, Height, decltype(transfer_function<Derivative_count>(std::declval<T>()))>
+    transfer_function(const Matrix<Width, Height, T> &input) noexcept
 {
-    for(std::size_t y = 0; y < Y; y++)
-    {
-        os << "| ";
-        for(std::size_t x = 0; x < X; x++)
-        {
-            auto old_precision = os.precision(number_type_write_precision);
-            auto old_width = os.width(number_type_write_precision + 5);
-            try
-            {
-                os << v(x, y);
-            }
-            catch(...)
-            {
-                os.precision(old_precision);
-                os.width(old_width);
-                throw;
-            }
-            os.precision(old_precision);
-            os.width(old_width);
-            os << ' ';
-        }
-        os << "|\n";
-    }
-    return os;
-}
-
-template <std::size_t N>
-using Row_vector = Matrix<N, 1>;
-
-template <std::size_t N>
-using Column_vector = Matrix<1, N>;
-
-template <unsigned Derivative_count = 0, std::size_t X, std::size_t Y>
-constexpr Matrix<X, Y> transfer_function(const Matrix<X, Y> &input) noexcept
-{
-    Matrix<X, Y> retval;
-    for(std::size_t y = 0; y < Y; y++)
-        for(std::size_t x = 0; x < X; x++)
-            retval(x, y) = transfer_function<Derivative_count>(input(x, y));
+    Matrix<Width, Height, decltype(transfer_function<Derivative_count>(std::declval<T>()))> retval;
+    for(std::size_t i = 0; i < Height; i++)
+        for(std::size_t j = 0; j < Width; j++)
+            retval(i, j) = transfer_function<Derivative_count>(input(i, j));
     return retval;
 }
 
@@ -248,11 +310,11 @@ template <std::size_t Input_size,
           std::size_t Hidden_layer_size = 2 * Input_size + 1>
 struct Neural_net
 {
-    typedef Row_vector<Input_size> Input_vector;
-    typedef Matrix<Hidden_layer_size, Input_size> Input_to_hidden_weights;
-    typedef Row_vector<Hidden_layer_size> Hidden_vector;
-    typedef Matrix<Output_size, Hidden_layer_size> Hidden_to_output_weights;
-    typedef Row_vector<Output_size> Output_vector;
+    typedef Row_vector<Input_size, Number_type> Input_vector;
+    typedef Matrix<Hidden_layer_size, Input_size, Number_type> Input_to_hidden_weights;
+    typedef Row_vector<Hidden_layer_size, Number_type> Hidden_vector;
+    typedef Matrix<Output_size, Hidden_layer_size, Number_type> Hidden_to_output_weights;
+    typedef Row_vector<Output_size, Number_type> Output_vector;
     Input_to_hidden_weights input_to_hidden_weights;
     Hidden_to_output_weights hidden_to_output_weights;
     template <typename Random_engine>
@@ -261,30 +323,90 @@ struct Neural_net
         std::uniform_real_distribution<Number_type> dist(-0.2_n, 0.2_n);
         for(std::size_t i = 0; i < Input_size; i++)
             for(std::size_t j = 0; j < Hidden_layer_size; j++)
-                input_to_hidden_weights(j, i) = dist(re);
+                input_to_hidden_weights(i, j) = dist(re);
         for(std::size_t i = 0; i < Hidden_layer_size; i++)
             for(std::size_t j = 0; j < Output_size; j++)
-                hidden_to_output_weights(j, i) = dist(re);
+                hidden_to_output_weights(i, j) = dist(re);
+    }
+    template <typename Input_number_type, typename Input_to_hidden_number_type>
+    static constexpr auto input_to_hidden(
+        const Row_vector<Input_size, Input_number_type> &input,
+        const Matrix<Hidden_layer_size, Input_size, Input_to_hidden_number_type>
+            &input_to_hidden_weights) noexcept
+    {
+        return transfer_function(input * input_to_hidden_weights);
+    }
+    constexpr Hidden_vector input_to_hidden(const Input_vector &input) const noexcept
+    {
+        return input_to_hidden(input, input_to_hidden_weights);
+    }
+    template <typename Hidden_number_type, typename Hidden_to_output_number_type>
+    static constexpr auto hidden_to_output(
+        const Row_vector<Hidden_layer_size, Hidden_number_type> &hidden,
+        const Matrix<Output_size, Hidden_layer_size, Hidden_to_output_number_type>
+            &hidden_to_output_weights) noexcept
+    {
+        return transfer_function(hidden * hidden_to_output_weights);
+    }
+    constexpr Output_vector hidden_to_output(const Hidden_vector &hidden) const noexcept
+    {
+        return hidden_to_output(hidden, hidden_to_output_weights);
+    }
+    template <typename Input_number_type,
+              typename Input_to_hidden_number_type,
+              typename Hidden_to_output_number_type>
+    static constexpr auto evaluate(
+        const Row_vector<Input_size, Input_number_type> &input,
+        const Matrix<Hidden_layer_size, Input_size, Input_to_hidden_number_type>
+            &input_to_hidden_weights,
+        const Matrix<Output_size, Hidden_layer_size, Hidden_to_output_number_type>
+            &hidden_to_output_weights) noexcept
+    {
+        auto hidden = input_to_hidden(input, input_to_hidden_weights);
+        return hidden_to_output(hidden, hidden_to_output_weights);
     }
     constexpr Output_vector evaluate(const Input_vector &input) const noexcept
     {
-        Hidden_vector hidden = transfer_function(input_to_hidden_weights * input);
-        return transfer_function(hidden_to_output_weights * hidden);
+        return evaluate(input, input_to_hidden_weights, hidden_to_output_weights);
     }
     struct Learn_results
     {
         Number_type initial_squared_error;
+
+        // derivative of initial_squared_error with respect to each element of
+        // hidden_to_output_weights
+        Hidden_to_output_weights hidden_to_output_weight_derivatives;
+
+        // derivative of initial_squared_error with respect to each element of
+        // input_to_hidden_weights
+        Input_to_hidden_weights input_to_hidden_weight_derivatives;
     };
     constexpr Learn_results learn(const Input_vector &input,
                                   const Output_vector &correct_output,
                                   Number_type step_size) noexcept
     {
         Learn_results learn_results{};
-        Hidden_vector hidden = transfer_function(input_to_hidden_weights * input);
-        Output_vector initial_output = transfer_function(hidden_to_output_weights * hidden);
-        Output_vector output_difference = initial_output - correct_output;
-        learn_results.initial_squared_error = output_difference.get_transpose() * output_difference;
-#warning finish implementing
+        Hidden_vector hidden_input = input * input_to_hidden_weights;
+        Hidden_vector hidden = transfer_function(hidden_input);
+        Output_vector output_input = hidden * hidden_to_output_weights;
+        Output_vector output = transfer_function(output_input);
+        Output_vector output_difference = output - correct_output;
+        learn_results.initial_squared_error = output_difference * output_difference.get_transpose();
+
+        Output_vector dtf_output = transfer_function<1>(output_input);
+        Output_vector dtf_output_times_output_difference_times_2 =
+            2_n * dtf_output.elementwise_product(output_difference);
+        learn_results.hidden_to_output_weight_derivatives =
+            hidden.get_transpose() * dtf_output_times_output_difference_times_2;
+        learn_results.input_to_hidden_weight_derivatives =
+            input.get_transpose()
+            * transfer_function<1>(hidden_input)
+                  .elementwise_product(
+                      (hidden_to_output_weights
+                       * dtf_output_times_output_difference_times_2.get_transpose())
+                          .get_transpose());
+        input_to_hidden_weights -= step_size * learn_results.input_to_hidden_weight_derivatives;
+        hidden_to_output_weights -= step_size * learn_results.hidden_to_output_weight_derivatives;
         return learn_results;
     }
 };
@@ -292,3 +414,5 @@ struct Neural_net
 }
 
 #endif // NEURAL_NEURAL_H_
+
+

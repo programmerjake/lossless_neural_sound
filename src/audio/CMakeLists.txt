@@ -19,10 +19,18 @@
 # SOFTWARE.
 #
 cmake_minimum_required(VERSION 3.1 FATAL_ERROR)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-add_subdirectory(neural)
-add_subdirectory(util)
-add_subdirectory(audio)
-add_executable(lossless_neural_sound main.cpp)
-target_link_libraries(lossless_neural_sound neural util audio Threads::Threads)
+find_package(FLAC REQUIRED)
+set(AUDIO_HAS_FLAC 0)
+if(FLAC_LIBRARIES AND FLAC_INCLUDE_DIR)
+    set(AUDIO_HAS_FLAC 1)
+endif()
 
+configure_file(audio_config.h.in audio_config.h ESCAPE_QUOTES)
+set(sources audio.cpp flac.cpp)
+add_library(audio STATIC ${sources})
+target_include_directories(audio PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+
+if(AUDIO_HAS_FLAC)
+    target_include_directories(audio PRIVATE ${FLAC_INCLUDE_DIR})
+    target_link_libraries(audio ${FLAC_LIBRARIES})
+endif()

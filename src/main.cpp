@@ -24,15 +24,19 @@
 #include "neural/neural.h"
 #include "util/scheduler.h"
 #include "util/constexpr_array.h"
+#include "audio/audio.h"
 #include <random>
 #include <cmath>
 #include <mutex>
 #include <vector>
 #include <chrono>
+#include <fstream>
+#include <typeinfo>
 
 int main(int argc, char **argv)
 {
     using namespace lossless_neural_sound;
+#if 0
     util::Scheduler scheduler;
     static constexpr std::size_t input_size = 64;
     static constexpr std::size_t output_size = 50;
@@ -113,4 +117,53 @@ int main(int argc, char **argv)
                      / std::chrono::duration_cast<std::chrono::duration<double>>(elapsed_time)
                            .count()
               << " evaluations per second" << std::endl;
+#else
+    try
+    {
+        auto input_stream =
+            std::unique_ptr<audio::Input_stream>(new audio::File_input_stream("Fluids.flac"));
+        std::unique_ptr<audio::Audio_reader> audio_reader;
+        for(auto *format : audio::Audio_formats::get())
+        {
+            std::cerr << "trying " << format->name << std::endl;
+            try
+            {
+                audio_reader = format->create_reader(std::move(input_stream));
+            }
+            catch(audio::Audio_error &e)
+            {
+                if(e.code() == audio::Audio_error_code::format_does_not_match)
+                {
+                    dynamic_cast<audio::Rewindable_input_stream &>(*input_stream).rewind();
+                    continue;
+                }
+                throw;
+            }
+            break;
+        }
+        if(!audio_reader)
+        {
+            std::cerr << "can't read: all formats failed" << std::endl;
+            return 1;
+        }
+        std::cout << "channel_count: "
+                  << static_cast<std::size_t>(audio_reader->get_channel_count()) << "\n";
+        std::cout << "sample_rate: " << static_cast<std::size_t>(audio_reader->get_sample_rate())
+                  << "\n";
+        std::ofstream os("output.bin", std::ios::binary);
+        std::vector<float> buffer(audio_reader->get_ideal_buffer_size_in_samples());
+        while(true)
+        {
+            auto read_count = audio_reader->read_samples(buffer.data(), buffer.size());
+            if(read_count == 0)
+                break;
+            os.write(reinterpret_cast<const char *>(buffer.data()), read_count * sizeof(buffer[0]));
+        }
+    }
+    catch(std::exception &e)
+    {
+        std::cerr << "caught: " << typeid(e).name() << ":\nwhat: " << e.what() << std::endl;
+        return 1;
+    }
+#endif
 }

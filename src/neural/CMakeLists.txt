@@ -21,3 +21,4 @@
 cmake_minimum_required(VERSION 3.1 FATAL_ERROR)
 set(sources neural.cpp)
 add_library(neural STATIC ${sources})
+target_link_libraries(neural util math)

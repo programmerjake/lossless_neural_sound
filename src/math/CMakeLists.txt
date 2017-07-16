@@ -19,12 +19,6 @@
 # SOFTWARE.
 #
 cmake_minimum_required(VERSION 3.1 FATAL_ERROR)
-include_directories(${CMAKE_CURRENT_SOURCE_DIR})
-add_subdirectory(neural)
-add_subdirectory(util)
-add_subdirectory(audio)
-add_subdirectory(expression_compiler)
-add_subdirectory(math)
-add_executable(lossless_neural_sound main.cpp)
-target_link_libraries(lossless_neural_sound neural util audio Threads::Threads)
-
+set(sources matrix.cpp)
+add_library(math STATIC ${sources})
+target_link_libraries(math util)

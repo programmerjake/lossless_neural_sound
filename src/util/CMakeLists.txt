@@ -19,6 +19,7 @@
 # SOFTWARE.
 #
 cmake_minimum_required(VERSION 3.1 FATAL_ERROR)
-set(sources is_referenceable.cpp
+set(sources array_stack.cpp
+            is_referenceable.cpp
             is_swappable.cpp)
 add_library(util STATIC ${sources})

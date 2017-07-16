@@ -27,6 +27,7 @@
 #include <string>
 #include <array>
 #include "arena.h"
+#include "util/array_stack.h"
 #include <utility>
 #include <unordered_map>
 #include <sstream>
@@ -34,6 +35,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <algorithm>
+#include <limits>
 
 namespace lossless_neural_sound
 {
@@ -141,8 +143,14 @@ struct Expression_node : public Node
                 os << "    ";
         }
     };
+    struct Code_writing_options
+    {
+        std::string value_type = "double";
+        std::string indent = "";
+    };
     struct Code_writing_state
     {
+        Code_writing_options options;
         std::size_t next_temporary_variable_index = 0;
         std::string make_temporary()
         {
@@ -153,17 +161,69 @@ struct Expression_node : public Node
         struct State
         {
             bool written = false;
-            std::string variable_name;
-            explicit State(const Expression_node *node, Code_writing_state *code_writing_state);
+            std::string cached_variable_name{};
+            const std::string &get_variable_name(const Expression_node *node,
+                                                 Code_writing_state &code_writing_state);
         };
         std::unordered_map<const Expression_node *, State> states;
         State &get_state(const Expression_node *node)
         {
-            auto iter = states.find(node);
-            if(iter == states.end())
-                return std::get<1>(*std::get<0>(states.emplace(node, State(node, this))));
-            return std::get<1>(*iter);
+            return states[node];
         }
+        const std::string &get_variable_name(const Expression_node *node)
+        {
+            return get_state(node).get_variable_name(node, *this);
+        }
+        void write_variable_assignment(std::ostream &os,
+                                       const std::string &variable,
+                                       const Expression_node *value)
+        {
+            os << options.indent << variable << " = " << get_variable_name(value) << ";\n";
+        }
+        explicit Code_writing_state(Code_writing_options options) : options(std::move(options))
+        {
+        }
+    };
+    struct Expression_writing_state
+    {
+        enum class Precedence
+        {
+            Add,
+            Times,
+            Atom,
+        };
+        Precedence current_precedence = Precedence();
+        struct Parenthesis_writer
+        {
+            Parenthesis_writer(const Parenthesis_writer &) = delete;
+            Parenthesis_writer &operator=(const Parenthesis_writer &) = delete;
+            Expression_writing_state &state;
+            std::ostream &os;
+            Precedence old_precedence;
+            bool need_parenthesis;
+            Parenthesis_writer(Expression_writing_state &state,
+                               std::ostream &os,
+                               Precedence precedence,
+                               bool can_write_parenthesis = true)
+                : state(state),
+                  os(os),
+                  old_precedence(state.current_precedence),
+                  need_parenthesis(false)
+            {
+                state.current_precedence = precedence;
+                if(state.current_precedence < old_precedence && can_write_parenthesis)
+                {
+                    need_parenthesis = true;
+                    os << "(";
+                }
+            }
+            ~Parenthesis_writer() noexcept(false)
+            {
+                if(need_parenthesis)
+                    os << ")";
+                state.current_precedence = old_precedence;
+            }
+        };
     };
     void dump(std::ostream &os) const
     {
@@ -172,12 +232,23 @@ struct Expression_node : public Node
     }
     void write_code(std::ostream &os) const
     {
-        Code_writing_state state;
+        Code_writing_state state({});
         write_code(os, state);
+    }
+    void write_code(std::ostream &os, Code_writing_options options) const
+    {
+        Code_writing_state state(std::move(options));
+        write_code(os, state);
+    }
+    void write_expression(std::ostream &os) const
+    {
+        Expression_writing_state state;
+        write_expression(os, state);
     }
     virtual Kind get_kind() const noexcept = 0;
     virtual void dump(std::ostream &os, Dump_state &state) const = 0;
     virtual void write_code(std::ostream &os, Code_writing_state &state) const = 0;
+    virtual void write_expression(std::ostream &os, Expression_writing_state &state) const = 0;
     virtual const Expression_node *get_derivative(Arena &arena,
                                                   Nodes &nodes,
                                                   const Variable *variable) const = 0;
@@ -339,9 +410,17 @@ struct Constant final : public Expression_node
         if(node_state.written)
             return;
         node_state.written = true;
-        os << "constexpr double " << node_state.variable_name << " = ";
+        os << state.options.indent << "const " << state.options.value_type << " "
+           << node_state.get_variable_name(this, state) << " = ";
         write_value(os, value);
         os << ";\n";
+    }
+    using Expression_node::write_expression;
+    virtual void write_expression(std::ostream &os, Expression_writing_state &state) const override
+    {
+        Expression_writing_state::Parenthesis_writer pw(
+            state, os, Expression_writing_state::Precedence::Atom);
+        write_value(os, value);
     }
     virtual const Expression_node *get_derivative(
         Arena &arena, Nodes &nodes, [[gnu::unused]] const Variable *variable) const override
@@ -395,18 +474,46 @@ struct Variable : public Expression_node
 struct Element_variable final : public Variable
 {
     const Matrix_variable *matrix_variable;
-    std::array<std::size_t, Matrix_variable::dimension_count> indexes;
+    std::array<std::size_t, Matrix_variable::dimension_count>
+        indexes; // in reverse order of Matrix_variable::sizes
     explicit Element_variable(const Matrix_variable *matrix_variable,
                               std::array<std::size_t, Matrix_variable::dimension_count> indexes)
         : matrix_variable(matrix_variable), indexes(indexes)
     {
     }
+    void write_indexes(std::ostream &os) const
+    {
+        std::size_t non_unit_dimension_count = 0;
+        std::size_t non_unit_dimension_index = 0;
+        for(std::size_t i = 0; i < indexes.size(); i++)
+        {
+            if(matrix_variable->sizes[i] != 1)
+            {
+                non_unit_dimension_count++;
+                non_unit_dimension_index = i;
+            }
+        }
+        if(non_unit_dimension_count == 1)
+        {
+            os << "[" << indexes[indexes.size() - 1 - non_unit_dimension_index] << "]";
+        }
+        else
+        {
+            auto separator = "";
+            os << "(";
+            for(std::size_t i : indexes)
+            {
+                os << separator << i;
+                separator = ", ";
+            }
+            os << ")";
+        }
+    }
     virtual std::string get_variable_code_name() const override
     {
         std::ostringstream ss;
         ss << matrix_variable->name;
-        for(std::size_t i : indexes)
-            ss << "[" << i << "]";
+        write_indexes(ss);
         return ss.str();
     }
     virtual Kind get_kind() const noexcept override
@@ -418,14 +525,21 @@ struct Element_variable final : public Variable
     {
         state.write_indent(os);
         os << matrix_variable->name;
-        for(std::size_t i : indexes)
-            os << "[" << i << "]";
+        write_indexes(os);
         os << "\n";
     }
     using Expression_node::write_code;
     virtual void write_code([[gnu::unused]] std::ostream &os,
                             [[gnu::unused]] Code_writing_state &state) const override
     {
+    }
+    using Expression_node::write_expression;
+    virtual void write_expression(std::ostream &os, Expression_writing_state &state) const override
+    {
+        Expression_writing_state::Parenthesis_writer pw(
+            state, os, Expression_writing_state::Precedence::Atom);
+        os << matrix_variable->name;
+        write_indexes(os);
     }
     virtual std::size_t hash() const noexcept override
     {
@@ -477,46 +591,170 @@ struct Element_variable final : public Variable
     }
 };
 
-inline Expression_node::Code_writing_state::State::State(const Expression_node *node,
-                                                         Code_writing_state *code_writing_state)
+inline const std::string &Expression_node::Code_writing_state::State::get_variable_name(
+    const Expression_node *node, Code_writing_state &code_writing_state)
 {
-    auto *variable = dynamic_cast<const Variable *>(node);
-    if(variable)
-        variable_name = variable->get_variable_code_name();
-    else
-        variable_name = code_writing_state->make_temporary();
+    if(cached_variable_name.empty())
+    {
+        auto *variable = dynamic_cast<const Variable *>(node);
+        if(variable)
+            cached_variable_name = variable->get_variable_code_name();
+        else
+            cached_variable_name = code_writing_state.make_temporary();
+    }
+    return cached_variable_name;
 }
 
-struct Sum final : public Expression_node
+template <typename Derived_class>
+class Balanced_tree : public Expression_node
 {
-    std::vector<const Expression_node *> terms;
+public:
+    const Expression_node *left_node;
+    const Expression_node *right_node;
 
-private:
-    explicit Sum(std::vector<const Expression_node *> terms) : terms(std::move(terms))
+protected:
+    explicit Balanced_tree(const Expression_node *left_node, const Expression_node *right_node)
+        : left_node(left_node), right_node(right_node)
     {
-        assert(this->terms.size() >= 2);
     }
 
 public:
     virtual std::size_t hash() const noexcept override
     {
-        std::size_t retval = terms.size();
-        for(auto *term : terms)
-            retval = retval * 0x12345UL ^ std::hash<const Expression_node *>()(term);
-        return retval;
+        return std::hash<const Expression_node *>()(left_node) * 0x12345UL
+               ^ std::hash<const Expression_node *>()(right_node);
     }
     virtual bool same(const Node *other) const noexcept override
     {
-        auto *rt = dynamic_cast<const Sum *>(other);
-        if(rt && terms.size() == rt->terms.size())
-        {
-            for(std::size_t i = 0; i < terms.size(); i++)
-                if(terms[i] != rt->terms[i])
-                    return false;
+        auto *rt = dynamic_cast<const Derived_class *>(other);
+        if(rt && left_node == rt->left_node && right_node == rt->right_node)
             return true;
-        }
         return false;
     }
+
+protected:
+    template <typename Fn>
+    void visit_leaves(Fn fn) const
+    {
+        if(auto *node = dynamic_cast<const Balanced_tree *>(left_node))
+            node->visit_leaves(fn);
+        else
+            fn(left_node);
+        if(auto *node = dynamic_cast<const Balanced_tree *>(right_node))
+            node->visit_leaves(fn);
+        else
+            fn(right_node);
+    }
+    template <typename... Args>
+    static const Expression_node *make_tree(Arena &arena,
+                                            Nodes &nodes,
+                                            const Expression_node *const *leaves,
+                                            std::size_t leaf_count,
+                                            const Args &... args)
+    {
+        assert(leaf_count != 0);
+        if(leaf_count == 1)
+            return leaves[0];
+        std::size_t split_index = leaf_count / 2;
+        const Expression_node *left_node = make_tree(arena, nodes, leaves, split_index, args...);
+        const Expression_node *right_node =
+            make_tree(arena, nodes, leaves + split_index, leaf_count - split_index, args...);
+        return nodes.intern(arena, Derived_class(left_node, right_node, args...));
+    }
+
+protected:
+    class Leaf_iterator
+    {
+    private:
+        // tree is always balanced, so this is the max tree depth for
+        // std::numeric_limits<std::size_t>::max() nodes:
+        static constexpr std::size_t max_tree_depth = std::numeric_limits<std::size_t>::digits + 1;
+        typedef util::Array_stack<const Expression_node *, max_tree_depth> Stack_type;
+        Stack_type stack;
+
+    private:
+        void find_leaf() noexcept
+        {
+            while(auto *node = dynamic_cast<const Balanced_tree *>(stack.top()))
+            {
+                stack.top() = node->right_node;
+                stack.push(node->left_node);
+            }
+        }
+
+    public:
+        constexpr Leaf_iterator() noexcept : stack()
+        {
+        }
+        explicit Leaf_iterator(const Balanced_tree *node) noexcept : stack()
+        {
+            assert(node);
+            stack.push(node);
+            find_leaf();
+        }
+        constexpr bool operator==(const Leaf_iterator &rt) const noexcept
+        {
+            if(stack.empty() && rt.stack.empty())
+                return true;
+            return false;
+        }
+        constexpr bool operator!=(const Leaf_iterator &rt) const noexcept
+        {
+            return !operator==(rt);
+        }
+        const Expression_node *operator*() const noexcept
+        {
+            return stack.top();
+        }
+        Leaf_iterator &operator++() noexcept
+        {
+            stack.pop();
+            if(!stack.empty())
+                find_leaf();
+            return *this;
+        }
+        Leaf_iterator operator++(int) noexcept
+        {
+            auto retval = *this;
+            operator++();
+            return retval;
+        }
+    };
+
+protected:
+    int structurally_compare_tree(const Balanced_tree *rt) const noexcept
+    {
+        assert(rt);
+        auto left_iterator = Leaf_iterator(this);
+        auto right_iterator = Leaf_iterator(rt);
+        for(; left_iterator != Leaf_iterator() && right_iterator != Leaf_iterator();
+            ++left_iterator, ++right_iterator)
+        {
+            int compare_result = (*left_iterator)->structurally_compare(*right_iterator);
+            if(compare_result != 0)
+                return compare_result;
+        }
+        bool left_at_end = left_iterator == Leaf_iterator();
+        bool right_at_end = right_iterator == Leaf_iterator();
+        if(left_at_end && !right_at_end)
+            return -1;
+        if(!left_at_end && right_at_end)
+            return 1;
+        return 0;
+    }
+};
+
+struct Sum final : public Balanced_tree<Sum>
+{
+    friend class Balanced_tree<Sum>;
+
+private:
+    explicit Sum(const Expression_node *left_node, const Expression_node *right_node)
+        : Balanced_tree(left_node, right_node)
+    {
+    }
+
+public:
     virtual Sum *reallocate(Arena &arena) const &override
     {
         return arena.create<Sum>(*this);
@@ -535,8 +773,10 @@ public:
         state.write_indent(os);
         os << "Sum:\n";
         state.indent_depth++;
-        for(auto *term : terms)
-            term->dump(os, state);
+        visit_leaves([&](const Expression_node *term)
+                     {
+                         term->dump(os, state);
+                     });
         state.indent_depth--;
     }
     using Expression_node::write_code;
@@ -546,25 +786,35 @@ public:
         if(node_state.written)
             return;
         node_state.written = true;
-        for(auto *term : terms)
-            term->write_code(os, state);
-        os << "double " << node_state.variable_name << " = ";
+        left_node->write_code(os, state);
+        right_node->write_code(os, state);
+        os << state.options.indent << state.options.value_type << " "
+           << node_state.get_variable_name(this, state) << " = "
+           << state.get_variable_name(left_node) << " + " << state.get_variable_name(right_node)
+           << ";\n";
+    }
+    using Expression_node::write_expression;
+    virtual void write_expression(std::ostream &os, Expression_writing_state &state) const override
+    {
+        Expression_writing_state::Parenthesis_writer pw(
+            state, os, Expression_writing_state::Precedence::Add);
         auto separator = "";
-        for(auto *term : terms)
-        {
-            os << separator;
-            separator = " + ";
-            os << state.get_state(term).variable_name;
-        }
-        os << ";\n";
+        visit_leaves([&](const Expression_node *term)
+                     {
+                         os << separator;
+                         separator = " + ";
+                         term->write_expression(os, state);
+                     });
     }
     virtual const Expression_node *get_derivative(Arena &arena,
                                                   Nodes &nodes,
                                                   const Variable *variable) const override
     {
-        auto new_terms = terms;
-        for(auto &term : new_terms)
-            term = term->get_derivative(arena, nodes, variable);
+        std::vector<const Expression_node *> new_terms;
+        visit_leaves([&](const Expression_node *term)
+                     {
+                         new_terms.push_back(term->get_derivative(arena, nodes, variable));
+                     });
         return make(arena, nodes, new_terms.data(), new_terms.size());
     }
 
@@ -596,22 +846,14 @@ public:
     {
         return make(arena, nodes, terms.begin(), terms.size());
     }
+
+public:
     virtual int structurally_compare(const Expression_node *rt) const noexcept override
     {
         assert(rt);
         if(auto *sum = dynamic_cast<const Sum *>(rt))
         {
-            for(std::size_t i = 0; i < terms.size() && i < sum->terms.size(); i++)
-            {
-                int compare_result = terms[i]->structurally_compare(sum->terms[i]);
-                if(compare_result != 0)
-                    return compare_result;
-            }
-            if(terms.size() < sum->terms.size())
-                return -1;
-            if(terms.size() > sum->terms.size())
-                return 1;
-            return 0;
+            return structurally_compare_tree(sum);
         }
         auto rt_kind = rt->get_kind();
         if(Kind::Sum < rt_kind)
@@ -622,36 +864,17 @@ public:
     }
 };
 
-struct Product final : public Expression_node
+struct Product final : public Balanced_tree<Product>
 {
-    std::vector<const Expression_node *> factors;
+    friend class Balanced_tree<Product>;
 
 private:
-    explicit Product(std::vector<const Expression_node *> factors) : factors(std::move(factors))
+    explicit Product(const Expression_node *left_node, const Expression_node *right_node)
+        : Balanced_tree(left_node, right_node)
     {
-        assert(this->factors.size() >= 2);
     }
 
 public:
-    virtual std::size_t hash() const noexcept override
-    {
-        std::size_t retval = factors.size();
-        for(auto *factor : factors)
-            retval = retval * 0x12345UL ^ std::hash<const Expression_node *>()(factor);
-        return retval;
-    }
-    virtual bool same(const Node *other) const noexcept override
-    {
-        auto *rt = dynamic_cast<const Product *>(other);
-        if(rt && factors.size() == rt->factors.size())
-        {
-            for(std::size_t i = 0; i < factors.size(); i++)
-                if(factors[i] != rt->factors[i])
-                    return false;
-            return true;
-        }
-        return false;
-    }
     virtual Product *reallocate(Arena &arena) const &override
     {
         return arena.create<Product>(*this);
@@ -670,8 +893,10 @@ public:
         state.write_indent(os);
         os << "Product:\n";
         state.indent_depth++;
-        for(auto *factor : factors)
-            factor->dump(os, state);
+        visit_leaves([&](const Expression_node *factor)
+                     {
+                         factor->dump(os, state);
+                     });
         state.indent_depth--;
     }
     using Expression_node::write_code;
@@ -681,22 +906,35 @@ public:
         if(node_state.written)
             return;
         node_state.written = true;
-        for(auto *factor : factors)
-            factor->write_code(os, state);
-        os << "double " << node_state.variable_name << " = ";
+        left_node->write_code(os, state);
+        right_node->write_code(os, state);
+        os << state.options.indent << state.options.value_type << " "
+           << node_state.get_variable_name(this, state) << " = "
+           << state.get_variable_name(left_node) << " * " << state.get_variable_name(right_node)
+           << ";\n";
+    }
+    using Expression_node::write_expression;
+    virtual void write_expression(std::ostream &os, Expression_writing_state &state) const override
+    {
+        Expression_writing_state::Parenthesis_writer pw(
+            state, os, Expression_writing_state::Precedence::Times);
         auto separator = "";
-        for(auto *factor : factors)
-        {
-            os << separator;
-            separator = " * ";
-            os << state.get_state(factor).variable_name;
-        }
-        os << ";\n";
+        visit_leaves([&](const Expression_node *factor)
+                     {
+                         os << separator;
+                         separator = " * ";
+                         factor->write_expression(os, state);
+                     });
     }
     virtual const Expression_node *get_derivative(Arena &arena,
                                                   Nodes &nodes,
                                                   const Variable *variable) const override
     {
+        std::vector<const Expression_node *> factors;
+        visit_leaves([&](const Expression_node *factor)
+                     {
+                         factors.push_back(factor);
+                     });
         std::vector<const Expression_node *> terms;
         terms.reserve(factors.size());
         auto current_factors = factors;
@@ -726,21 +964,22 @@ public:
                                        const Expression_node *const *factors,
                                        std::size_t factor_count)
     {
-        std::size_t factors_list_size = 0;
-        for(std::size_t i = 0; i < factor_count; i++)
-            if(auto *product = dynamic_cast<const Product *>(factors[i]))
-                factors_list_size += product->factors.size();
-            else
-                factors_list_size++;
         std::vector<const Expression_node *> factors_list;
-        factors_list.reserve(factors_list_size);
         double constant_factor = 1;
         for(std::size_t i = 0; i < factor_count; i++)
+        {
             if(auto *product = dynamic_cast<const Product *>(factors[i]))
-                for(auto *factor : product->factors)
-                    make_helper(constant_factor, factors_list, factor);
+            {
+                product->visit_leaves([&](const Expression_node *factor)
+                                      {
+                                          make_helper(constant_factor, factors_list, factor);
+                                      });
+            }
             else
+            {
                 make_helper(constant_factor, factors_list, factors[i]);
+            }
+        }
         if(constant_factor == 0)
             return nodes.intern(arena, Constant(0));
         if(constant_factor != 1)
@@ -757,7 +996,7 @@ public:
                       assert(a && b);
                       return a->structurally_compare(b) < 0;
                   });
-        return nodes.intern(arena, Product(std::move(factors_list)));
+        return make_tree(arena, nodes, factors_list.data(), factors_list.size());
     }
     static const Expression_node *make(Arena &arena,
                                        Nodes &nodes,
@@ -768,16 +1007,21 @@ public:
     virtual Get_constant_factor_result get_constant_factor(Arena &arena,
                                                            Nodes &nodes) const override
     {
-        if(auto *constant = dynamic_cast<const Constant *>(factors.front()))
+        auto *front = left_node;
+        while(auto *node = dynamic_cast<const Product *>(front))
+            front = node->left_node;
+        if(auto *constant = dynamic_cast<const Constant *>(front))
         {
+            std::vector<const Expression_node *> factors;
+            visit_leaves([&](const Expression_node *factor)
+                         {
+                             factors.push_back(factor);
+                         });
             assert(factors.size() >= 2);
             if(factors.size() == 2)
                 return {constant->value, factors.back()};
-            std::vector<const Expression_node *> rest;
-            rest.reserve(factors.size() - 1);
-            for(std::size_t i = 1; i < factors.size(); i++)
-                rest.push_back(factors[i]);
-            return {constant->value, nodes.intern(arena, Product(std::move(rest)))};
+            factors.erase(factors.begin());
+            return {constant->value, make_tree(arena, nodes, factors.data(), factors.size())};
         }
         return {1, this};
     }
@@ -786,17 +1030,7 @@ public:
         assert(rt);
         if(auto *product = dynamic_cast<const Product *>(rt))
         {
-            for(std::size_t i = 0; i < factors.size() && i < product->factors.size(); i++)
-            {
-                int compare_result = factors[i]->structurally_compare(product->factors[i]);
-                if(compare_result != 0)
-                    return compare_result;
-            }
-            if(factors.size() < product->factors.size())
-                return -1;
-            if(factors.size() > product->factors.size())
-                return 1;
-            return 0;
+            return structurally_compare_tree(product);
         }
         auto rt_kind = rt->get_kind();
         if(Kind::Product < rt_kind)
@@ -817,10 +1051,16 @@ inline const Expression_node *Sum::make(Arena &arena,
     for(std::size_t i = 0; i < term_count; i++)
     {
         if(auto *sum = dynamic_cast<const Sum *>(terms[i]))
-            for(auto &term : sum->terms)
-                make_helper(arena, nodes, constant_term, terms_map, term);
+        {
+            sum->visit_leaves([&](const Expression_node *term)
+                              {
+                                  make_helper(arena, nodes, constant_term, terms_map, term);
+                              });
+        }
         else
+        {
             make_helper(arena, nodes, constant_term, terms_map, terms[i]);
+        }
     }
     std::vector<const Expression_node *> new_terms;
     new_terms.reserve(terms_map.size() + (constant_term != 0 ? 1 : 0));
@@ -848,7 +1088,7 @@ inline const Expression_node *Sum::make(Arena &arena,
                   assert(a && b);
                   return a->structurally_compare(b) < 0;
               });
-    return nodes.intern(arena, Sum(std::move(new_terms)));
+    return make_tree(arena, nodes, new_terms.data(), new_terms.size());
 }
 
 
@@ -899,8 +1139,23 @@ struct Transfer_function final : public Expression_node
             return;
         node_state.written = true;
         arg->write_code(os, state);
-        os << "double " << node_state.variable_name << " = transfer_function<" << derivative_count
-           << ">(" << state.get_state(arg).variable_name << ");\n";
+        os << state.options.indent << state.options.value_type << " "
+           << node_state.get_variable_name(this, state) << " = transfer_function";
+        if(derivative_count != 0)
+            os << "<" << derivative_count << ">";
+        os << "(" << state.get_variable_name(arg) << ");\n";
+    }
+    using Expression_node::write_expression;
+    virtual void write_expression(std::ostream &os, Expression_writing_state &state) const override
+    {
+        Expression_writing_state::Parenthesis_writer pw(
+            state, os, Expression_writing_state::Precedence(), false);
+        os << "transfer_function";
+        if(derivative_count != 0)
+            os << "<" << derivative_count << ">";
+        os << "(";
+        arg->write_expression(os, state);
+        os << ")";
     }
     virtual const Expression_node *get_derivative(Arena &arena,
                                                   Nodes &nodes,
@@ -931,12 +1186,21 @@ struct Transfer_function final : public Expression_node
     }
 };
 
+class Expression;
+
+template <std::size_t derivative_count = 0>
+Expression transfer_function(Arena &arena, Nodes &nodes, Expression e);
+
 class Expression
 {
+    template <std::size_t derivative_count>
+    friend Expression transfer_function(Arena &arena, Nodes &nodes, Expression e);
+
 private:
     Arena *arena;
     Nodes *nodes;
     const Expression_node *node;
+    double constant_value;
 
 private:
     bool is_compatible(const Expression &rt) const noexcept
@@ -945,6 +1209,12 @@ private:
     }
 
 public:
+    Expression(double constant_value = 0) noexcept : arena(nullptr),
+                                                     nodes(nullptr),
+                                                     node(nullptr),
+                                                     constant_value(constant_value)
+    {
+    }
     explicit Expression(Arena &arena, Nodes &nodes, double value)
         : arena(&arena), nodes(&nodes), node(nodes.intern(arena, Constant(value)))
     {
@@ -965,16 +1235,22 @@ public:
     }
     friend Expression operator+(double l, Expression r)
     {
-        return Expression(*r.arena, *r.nodes, l) + r;
+        return Expression(l) + r;
     }
     friend Expression operator+(Expression l, Expression r)
     {
+        if(!l.arena && !r.arena)
+            return l.constant_value + r.constant_value;
+        if(!l.arena)
+            l.get(*r.arena, *r.nodes);
+        else if(!r.arena)
+            r.get(*l.arena, *l.nodes);
         assert(l.is_compatible(r));
         return Expression(*l.arena, *l.nodes, Sum::make(*l.arena, *l.nodes, {l.node, r.node}));
     }
     friend Expression operator+(Expression l, double r)
     {
-        return l + Expression(*l.arena, *l.nodes, r);
+        return l + Expression(r);
     }
     Expression &operator+=(Expression r)
     {
@@ -986,7 +1262,7 @@ public:
     }
     friend Expression operator-(double l, Expression r)
     {
-        return Expression(*r.arena, *r.nodes, l) - r;
+        return Expression(l) - r;
     }
     friend Expression operator-(Expression l, Expression r)
     {
@@ -994,7 +1270,7 @@ public:
     }
     friend Expression operator-(Expression l, double r)
     {
-        return l - Expression(*l.arena, *l.nodes, r);
+        return l - Expression(r);
     }
     Expression &operator-=(Expression r)
     {
@@ -1006,16 +1282,22 @@ public:
     }
     friend Expression operator*(Expression l, Expression r)
     {
+        if(!l.arena && !r.arena)
+            return l.constant_value * r.constant_value;
+        if(!l.arena)
+            l.get(*r.arena, *r.nodes);
+        else if(!r.arena)
+            r.get(*l.arena, *l.nodes);
         assert(l.is_compatible(r));
         return Expression(*l.arena, *l.nodes, Product::make(*l.arena, *l.nodes, {l.node, r.node}));
     }
     friend Expression operator*(double l, Expression r)
     {
-        return Expression(*r.arena, *r.nodes, l) * r;
+        return Expression(l) * r;
     }
     friend Expression operator*(Expression l, double r)
     {
-        return l * Expression(*l.arena, *l.nodes, r);
+        return l * Expression(r);
     }
     Expression &operator*=(Expression r)
     {
@@ -1025,21 +1307,44 @@ public:
     {
         return operator=(*this * r);
     }
-    template <std::size_t derivative_count = 0>
-    static Expression transfer_function(Expression e)
+    const Expression_node *get(Arena &arena, Nodes &nodes) const
     {
-        e.node = e.nodes->intern(*e.arena, Transfer_function(e.node, derivative_count));
-        return e;
+        return Expression(*this).get(arena, nodes);
     }
-    const Expression_node *get() const noexcept
+    const Expression_node *get(Arena &arena, Nodes &nodes)
     {
+        if(!node)
+            *this = Expression(arena, nodes, constant_value);
         return node;
     }
     Expression get_derivative(const Variable *variable) const
     {
+        if(!node)
+            return Expression(0);
         return Expression(*arena, *nodes, node->get_derivative(*arena, *nodes, variable));
     }
+    Expression get_derivative(const Expression &variable) const
+    {
+        assert(dynamic_cast<const Variable *>(variable.node));
+        return get_derivative(static_cast<const Variable *>(variable.node));
+    }
+    friend std::ostream &operator<<(std::ostream &os, const Expression &e)
+    {
+        if(!e.node)
+            Constant::write_value(os, e.constant_value);
+        else
+            e.node->write_expression(os);
+        return os;
+    }
 };
+
+template <std::size_t derivative_count>
+inline Expression transfer_function(Arena &arena, Nodes &nodes, Expression e)
+{
+    e.get(arena, nodes);
+    e.node = e.nodes->intern(*e.arena, Transfer_function(e.node, derivative_count));
+    return e;
+}
 }
 }
 }

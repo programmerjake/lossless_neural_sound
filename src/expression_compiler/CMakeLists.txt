@@ -21,3 +21,4 @@
 cmake_minimum_required(VERSION 3.1 FATAL_ERROR)
 set(sources expression_compiler.cpp)
 add_executable(expression_compiler ${sources})
+target_compile_options(expression_compiler PRIVATE -O2)

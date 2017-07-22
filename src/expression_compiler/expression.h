@@ -36,6 +36,8 @@
 #include <cstdlib>
 #include <algorithm>
 #include <limits>
+#include <cassert>
+#include <iostream>
 
 namespace lossless_neural_sound
 {
@@ -43,50 +45,21 @@ namespace expression_compiler
 {
 namespace expression
 {
+class Nodes;
+
 struct Node
 {
+    friend class Nodes;
+
+private:
+    mutable const Node *hash_next = nullptr;
+
+public:
     virtual ~Node() = default;
     virtual std::size_t hash() const noexcept = 0;
     virtual bool same(const Node *other) const noexcept = 0;
     virtual Node *reallocate(Arena &arena) const & = 0;
     virtual Node *reallocate(Arena &arena)&& = 0;
-};
-
-class Nodes final
-{
-private:
-    std::unordered_multimap<std::size_t, const Node *> node_set;
-
-private:
-    struct Find_results
-    {
-        std::size_t hash;
-        const Node *node;
-    };
-    static Node &&to_node_reference(Node &&node) noexcept
-    {
-        return std::move(node);
-    }
-    static const Node &to_node_reference(const Node &node) noexcept
-    {
-        return std::move(node);
-    }
-
-public:
-    template <typename T>
-    const T *intern(Arena &arena, T &&node)
-    {
-        auto &&node_reference = to_node_reference(std::forward<T>(node));
-        std::size_t hash = node_reference.hash();
-        auto equal_range = node_set.equal_range(hash);
-        for(auto iter = std::get<0>(equal_range); iter != std::get<1>(equal_range); ++iter)
-            if(node_reference.same(std::get<1>(*iter)))
-                return static_cast<const T *>(std::get<1>(*iter));
-        const Node *retval =
-            std::forward<decltype(node_reference)>(node_reference).reallocate(arena);
-        node_set.emplace(hash, retval);
-        return static_cast<const T *>(retval);
-    }
 };
 
 struct Matrix_variable final : public Node
@@ -126,6 +99,155 @@ struct Variable;
 
 struct Expression_node : public Node
 {
+    friend class Nodes;
+
+private:
+    struct AA_tree_node
+    {
+        const Expression_node *parent = nullptr;
+        const Expression_node *left_child = nullptr;
+        const Expression_node *right_child = nullptr;
+        std::size_t tree_size = 1;
+        std::size_t tree_level = 1;
+        void update_size() noexcept
+        {
+            tree_size = 1 + get_tree_size(left_child) + get_tree_size(right_child);
+        }
+        bool is_valid() const noexcept
+        {
+            if(tree_size != 1 + get_tree_size(left_child) + get_tree_size(right_child))
+                return false;
+            if(tree_level == 0)
+                return false;
+            if((left_child ? left_child->aa_tree_node.tree_level : 0) != tree_level - 1)
+                return false;
+            auto right_child_level = (right_child ? right_child->aa_tree_node.tree_level : 0);
+            if(right_child_level != tree_level - 1 && right_child_level != tree_level)
+                return false;
+            if(right_child && right_child->aa_tree_node.right_child
+               && right_child->aa_tree_node.right_child->aa_tree_node.tree_level >= tree_level)
+                return false;
+            if(tree_level > 1 && !left_child)
+                return false;
+            if(tree_level > 1 && !right_child)
+                return false;
+            if(left_child && &left_child->aa_tree_node.parent->aa_tree_node != this)
+                return false;
+            if(right_child && &right_child->aa_tree_node.parent->aa_tree_node != this)
+                return false;
+#if 0
+            return (!left_child || left_child->aa_tree_node.is_valid())
+                   && (!right_child || right_child->aa_tree_node.is_valid());
+#else
+            return true;
+#endif
+        }
+        template <const Expression_node *AA_tree_node::*member>
+        static void update_childs_parent(const Expression_node *node) noexcept
+        {
+            assert(node);
+            auto &child = node->aa_tree_node.*member;
+            if(child)
+                child->aa_tree_node.parent = node;
+        }
+        static const Expression_node *skew(const Expression_node *node) noexcept
+        {
+            if(!node)
+                return node;
+            if(!node->aa_tree_node.left_child)
+                return node;
+            if(node->aa_tree_node.left_child->aa_tree_node.tree_level
+               == node->aa_tree_node.tree_level)
+            {
+                auto *l = node->aa_tree_node.left_child;
+                l->aa_tree_node.parent = node->aa_tree_node.parent;
+                node->aa_tree_node.left_child = l->aa_tree_node.right_child;
+                update_childs_parent<&AA_tree_node::left_child>(node);
+                node->aa_tree_node.update_size();
+                l->aa_tree_node.right_child = node;
+                update_childs_parent<&AA_tree_node::right_child>(l);
+                l->aa_tree_node.update_size();
+                return l;
+            }
+            return node;
+        }
+        static const Expression_node *split(const Expression_node *node) noexcept
+        {
+            if(!node)
+                return node;
+            if(!node->aa_tree_node.right_child
+               || !node->aa_tree_node.right_child->aa_tree_node.right_child)
+                return node;
+            if(node->aa_tree_node.tree_level
+               == node->aa_tree_node.right_child->aa_tree_node.right_child->aa_tree_node.tree_level)
+            {
+                auto *r = node->aa_tree_node.right_child;
+                r->aa_tree_node.parent = node->aa_tree_node.parent;
+                node->aa_tree_node.right_child = r->aa_tree_node.left_child;
+                update_childs_parent<&AA_tree_node::right_child>(node);
+                node->aa_tree_node.update_size();
+                r->aa_tree_node.left_child = node;
+                update_childs_parent<&AA_tree_node::left_child>(r);
+                r->aa_tree_node.tree_level++;
+                r->aa_tree_node.update_size();
+                return r;
+            }
+            return node;
+        }
+        static const Expression_node *insert(const Expression_node *root,
+                                             const Expression_node *new_node) noexcept
+        {
+            assert(new_node);
+            if(!root)
+            {
+                new_node->aa_tree_node = {};
+                assert(new_node->aa_tree_node.is_valid());
+                return new_node;
+            }
+            assert(root->aa_tree_node.is_valid());
+            if(new_node->structurally_compare_implementation(root) < 0)
+            {
+                root->aa_tree_node.left_child = insert(root->aa_tree_node.left_child, new_node);
+                update_childs_parent<&AA_tree_node::left_child>(root);
+            }
+            else
+            {
+                root->aa_tree_node.right_child = insert(root->aa_tree_node.right_child, new_node);
+                update_childs_parent<&AA_tree_node::right_child>(root);
+            }
+            root->aa_tree_node.update_size();
+            root = split(skew(root));
+            assert(root->aa_tree_node.is_valid());
+            return root;
+        }
+    };
+
+private:
+    mutable AA_tree_node aa_tree_node{};
+
+private:
+    static std::size_t get_tree_size(const Expression_node *node) noexcept
+    {
+        if(node)
+            return node->aa_tree_node.tree_size;
+        return 0;
+    }
+    std::size_t get_tree_index() const noexcept
+    {
+        std::size_t retval = get_tree_size(aa_tree_node.left_child);
+        const Expression_node *node = this;
+        while(node->aa_tree_node.parent)
+        {
+            assert(node->aa_tree_node.is_valid());
+            auto *parent = node->aa_tree_node.parent;
+            if(node == parent->aa_tree_node.right_child)
+                retval += 1 + get_tree_size(parent->aa_tree_node.left_child);
+            node = parent;
+        }
+        return retval;
+    }
+
+public:
     enum class Kind : unsigned
     {
         Constant = 0, // Constant must be first
@@ -263,7 +385,92 @@ struct Expression_node : public Node
         static_cast<void>(nodes);
         return {1, this};
     }
-    virtual int structurally_compare(const Expression_node *rt) const noexcept = 0;
+    virtual int structurally_compare_implementation(const Expression_node *rt) const noexcept = 0;
+    int structurally_compare(const Expression_node *rt) const noexcept
+    {
+        if(this == rt)
+            return 0;
+        auto my_tree_index = get_tree_index();
+        auto rt_tree_index = rt->get_tree_index();
+        if(my_tree_index < rt_tree_index)
+            return -1;
+        if(my_tree_index > rt_tree_index)
+            return 1;
+        return 0;
+    }
+};
+
+class Nodes final
+{
+private:
+    static constexpr std::size_t get_hash_table_size() noexcept
+    {
+        return 8191;
+    }
+    std::vector<const Node *> hash_table;
+    const Expression_node *expression_tree_root = nullptr;
+    std::size_t node_count = 0;
+
+private:
+    struct Find_results
+    {
+        std::size_t hash;
+        const Node *node;
+    };
+    static Node &&to_node_reference(Node &&node) noexcept
+    {
+        return std::move(node);
+    }
+    static const Node &to_node_reference(const Node &node) noexcept
+    {
+        return std::move(node);
+    }
+    void on_insert_node(const Node *) noexcept
+    {
+    }
+    void on_insert_node(const Expression_node *node) noexcept
+    {
+        expression_tree_root = Expression_node::AA_tree_node::insert(expression_tree_root, node);
+    }
+
+public:
+    Nodes()
+    {
+        hash_table.resize(get_hash_table_size(), nullptr);
+    }
+    Nodes(Nodes &&) = default;
+    Nodes &operator=(Nodes &&) = default;
+    Nodes(const Nodes &) = delete;
+    Nodes &operator=(const Nodes &) = delete;
+    template <typename T>
+    const T *intern(Arena &arena, T &&new_node)
+    {
+        auto &&node_reference = to_node_reference(std::forward<T>(new_node));
+        std::size_t hash = node_reference.hash();
+        auto &table_entry = hash_table[hash % get_hash_table_size()];
+        for(const Node **pnode = &table_entry; *pnode; *pnode = (*pnode)->hash_next)
+        {
+            if(node_reference.same(*pnode))
+            {
+                const Node *node = *pnode;
+                if(node != table_entry)
+                {
+                    *pnode = node->hash_next;
+                    node->hash_next = table_entry;
+                    table_entry = node;
+                }
+                return static_cast<const T *>(node);
+            }
+        }
+        const Node *node = std::forward<decltype(node_reference)>(node_reference).reallocate(arena);
+        node->hash_next = table_entry;
+        table_entry = node;
+        auto retval = static_cast<const T *>(node);
+        on_insert_node(retval);
+        if(++node_count % 0x1000 == 0)
+            std::cout << "node_count = " << node_count << std::endl;
+        return retval;
+    }
 };
 
 struct Constant final : public Expression_node
@@ -432,7 +639,8 @@ struct Constant final : public Expression_node
     {
         return {value, nodes.intern(arena, Constant(1))};
     }
-    virtual int structurally_compare(const Expression_node *rt) const noexcept override
+    virtual int structurally_compare_implementation(const Expression_node *rt) const
+        noexcept override
     {
         assert(rt);
         if(auto *constant = dynamic_cast<const Constant *>(rt))
@@ -563,7 +771,8 @@ struct Element_variable final : public Variable
     {
         return arena.create<Element_variable>(std::move(*this));
     }
-    virtual int structurally_compare(const Expression_node *rt) const noexcept override
+    virtual int structurally_compare_implementation(const Expression_node *rt) const
+        noexcept override
     {
         assert(rt);
         if(auto *variable = dynamic_cast<const Element_variable *>(rt))
@@ -848,7 +1057,8 @@ public:
     }
 
 public:
-    virtual int structurally_compare(const Expression_node *rt) const noexcept override
+    virtual int structurally_compare_implementation(const Expression_node *rt) const
+        noexcept override
     {
         assert(rt);
         if(auto *sum = dynamic_cast<const Sum *>(rt))
@@ -1025,7 +1235,8 @@ public:
         }
         return {1, this};
     }
-    virtual int structurally_compare(const Expression_node *rt) const noexcept override
+    virtual int structurally_compare_implementation(const Expression_node *rt) const
+        noexcept override
     {
         assert(rt);
         if(auto *product = dynamic_cast<const Product *>(rt))
@@ -1166,7 +1377,8 @@ struct Transfer_function final : public Expression_node
                              {nodes.intern(arena, Transfer_function(arg, derivative_count + 1)),
                               arg->get_derivative(arena, nodes, variable)});
     }
-    virtual int structurally_compare(const Expression_node *rt) const noexcept override
+    virtual int structurally_compare_implementation(const Expression_node *rt) const
+        noexcept override
     {
         assert(rt);
         if(auto *fn = dynamic_cast<const Transfer_function *>(rt))

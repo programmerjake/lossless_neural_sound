@@ -175,9 +175,9 @@ int main(int argc, char **argv)
     expression::Nodes nodes;
     constexpr std::size_t input_size = 16;
     typedef Expression_row_vector<input_size> Input_vector;
-    constexpr std::size_t hidden1_size = 32;
-    constexpr std::size_t hidden2_size = 32;
-    constexpr std::size_t output_size = 1;
+    constexpr std::size_t hidden1_size = 16;
+    constexpr std::size_t hidden2_size = 16;
+    constexpr std::size_t output_size = 16;
     typedef Expression_row_vector<output_size> Output_vector;
     const auto input =
         make_row_vector_variable(arena, nodes, "input", static_cast<const Input_vector *>(nullptr));

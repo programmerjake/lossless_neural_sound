@@ -371,9 +371,8 @@ public:
     virtual void dump(std::ostream &os, Dump_state &state) const = 0;
     virtual void write_code(std::ostream &os, Code_writing_state &state) const = 0;
     virtual void write_expression(std::ostream &os, Expression_writing_state &state) const = 0;
-    virtual const Expression_node *get_derivative(Arena &arena,
-                                                  Nodes &nodes,
-                                                  const Variable *variable) const = 0;
+    virtual const Expression_node *get_derivative_implementation(
+        Arena &arena, Nodes &nodes, const Variable *variable) const = 0;
     struct Get_constant_factor_result
     {
         double constant_factor;
@@ -398,10 +397,15 @@ public:
             return 1;
         return 0;
     }
+    const Expression_node *get_derivative(Arena &arena,
+                                          Nodes &nodes,
+                                          const Variable *variable) const;
 };
 
 class Nodes final
 {
+    friend class Expression_node;
+
 private:
     static constexpr std::size_t get_hash_table_size() noexcept
     {
@@ -410,6 +414,9 @@ private:
     std::vector<const Node *> hash_table;
     const Expression_node *expression_tree_root = nullptr;
     std::size_t node_count = 0;
+    std::unordered_map<const Expression_node *,
+                       std::unordered_map<const Variable *, const Expression_node *>>
+        derivative_cache;
 
 private:
     struct Find_results
@@ -472,6 +479,16 @@ public:
         return retval;
     }
 };
+
+inline const Expression_node *Expression_node::get_derivative(Arena &arena,
+                                                              Nodes &nodes,
+                                                              const Variable *variable) const
+{
+    auto &retval = nodes.derivative_cache[this][variable];
+    if(!retval)
+        retval = get_derivative_implementation(arena, nodes, variable);
+    return retval;
+}
 
 struct Constant final : public Expression_node
 {
@@ -629,7 +646,7 @@ struct Constant final : public Expression_node
             state, os, Expression_writing_state::Precedence::Atom);
         write_value(os, value);
     }
-    virtual const Expression_node *get_derivative(
+    virtual const Expression_node *get_derivative_implementation(
         Arena &arena, Nodes &nodes, [[gnu::unused]] const Variable *variable) const override
     {
         return nodes.intern(arena, Constant(0));
@@ -672,7 +689,7 @@ struct Variable : public Expression_node
                             [[gnu::unused]] Code_writing_state &state) const override
     {
     }
-    virtual const Expression_node *get_derivative(
+    virtual const Expression_node *get_derivative_implementation(
         Arena &arena, Nodes &nodes, [[gnu::unused]] const Variable *variable) const override final
     {
         return nodes.intern(arena, Constant(same(variable) ? 1 : 0));
@@ -1015,9 +1032,8 @@ public:
                          term->write_expression(os, state);
                      });
     }
-    virtual const Expression_node *get_derivative(Arena &arena,
-                                                  Nodes &nodes,
-                                                  const Variable *variable) const override
+    virtual const Expression_node *get_derivative_implementation(
+        Arena &arena, Nodes &nodes, const Variable *variable) const override
     {
         std::vector<const Expression_node *> new_terms;
         visit_leaves([&](const Expression_node *term)
@@ -1136,9 +1152,8 @@ public:
                          factor->write_expression(os, state);
                      });
     }
-    virtual const Expression_node *get_derivative(Arena &arena,
-                                                  Nodes &nodes,
-                                                  const Variable *variable) const override
+    virtual const Expression_node *get_derivative_implementation(
+        Arena &arena, Nodes &nodes, const Variable *variable) const override
     {
         std::vector<const Expression_node *> factors;
         visit_leaves([&](const Expression_node *factor)
@@ -1368,9 +1383,8 @@ struct Transfer_function final : public Expression_node
         arg->write_expression(os, state);
         os << ")";
     }
-    virtual const Expression_node *get_derivative(Arena &arena,
-                                                  Nodes &nodes,
-                                                  const Variable *variable) const override
+    virtual const Expression_node *get_derivative_implementation(
+        Arena &arena, Nodes &nodes, const Variable *variable) const override
     {
         return Product::make(arena,
                              nodes,

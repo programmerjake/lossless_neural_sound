@@ -51,7 +51,7 @@ public:
     }
     template <typename T2 = void>
     constexpr
-        typename std::enable_if<std::is_void<T2>::value && (Width == 1) != (Height == 1), T>::type &
+        typename std::enable_if<std::is_void<T2>::value && (Width == 1 || Height == 1), T>::type &
         operator[](std::size_t index) noexcept
     {
         if(Height == 1)
@@ -59,8 +59,7 @@ public:
         return (*this)(index, 0);
     }
     template <typename T2 = void>
-    constexpr const typename std::enable_if<std::is_void<T2>::value
-                                                && (Width == 1) != (Height == 1),
+    constexpr const typename std::enable_if<std::is_void<T2>::value && (Width == 1 || Height == 1),
                                             T>::type &
         operator[](std::size_t index) const noexcept
     {
@@ -216,7 +215,8 @@ public:
         return retval;
     }
     template <typename Char_type, typename Traits>
-    friend std::basic_ostream<Char_type, Traits> &operator<<(std::basic_ostream<Char_type, Traits> &os, const Matrix &v)
+    friend std::basic_ostream<Char_type, Traits> &operator<<(
+        std::basic_ostream<Char_type, Traits> &os, const Matrix &v)
     {
         for(std::size_t i = 0; i < Height; i++)
         {

@@ -24,6 +24,8 @@
 #include "expression.h"
 #include "math/matrix.h"
 #include <iostream>
+#include <fstream>
+#include <vector>
 
 using namespace lossless_neural_sound;
 using namespace expression_compiler;
@@ -167,55 +169,257 @@ inline void write_variable_assignments(
                                make_matrix_variable(arena, nodes, std::move(matrix_name), &values),
                                values);
 }
+
+constexpr std::size_t constexpr_pow(std::size_t base, std::size_t exponent) noexcept
+{
+    std::size_t retval = 1;
+    for(std::size_t i = 0; i < exponent; i++)
+    {
+        std::size_t product = retval * base;
+        assert(product / base == retval); // assert we didn't overflow
+        retval = product;
+    }
+    return retval;
+}
+
+constexpr const char *output_type_name = "float";
+
+struct Output_type_declaration
+{
+    std::string type;
+    std::string variable_prefix;
+    std::string variable_suffix;
+    std::string operator()(std::string variable_name) const
+    {
+        constexpr const char *separator_string = " ";
+        constexpr std::size_t separator_length = 1;
+        variable_name.reserve(type.size() + separator_length + variable_prefix.size()
+                              + variable_name.size()
+                              + variable_suffix.size());
+        return type + (separator_string + (variable_prefix + std::move(variable_name)))
+               + variable_suffix;
+    }
+};
+
+template <typename T>
+struct Get_output_type_declaration
+{
+    Output_type_declaration operator()() const = delete;
+};
+
+template <typename T>
+struct Get_output_type_declaration<const T> : public Get_output_type_declaration<T>
+{
+};
+
+template <>
+struct Get_output_type_declaration<expression::Expression>
+{
+    Output_type_declaration operator()() const
+    {
+        Output_type_declaration retval;
+        retval.type = output_type_name;
+        return retval;
+    }
+};
+
+static constexpr util::Constexpr_array<char, std::numeric_limits<std::size_t>::digits10 + 1>
+    constexpr_to_string_constant(std::size_t value) noexcept
+{
+    if(value < 10)
+        return {{static_cast<char>(value + '0'), '\0'}};
+    if(value < 100)
+        return {{static_cast<char>(value / 10 + '0'), static_cast<char>(value % 10 + '0'), '\0'}};
+    auto retval = constexpr_to_string_constant(value / 100);
+    value %= 100;
+    char *ptr = retval.data();
+    while(*ptr)
+        ptr++;
+    *ptr++ = value / 10 + '0';
+    *ptr++ = value % 10 + '0';
+    *ptr = '\0';
+    return retval;
+}
+
+template <typename T, std::size_t N>
+struct Get_output_type_declaration<T[N]>
+{
+    Output_type_declaration operator()() const
+    {
+        Output_type_declaration retval = Get_output_type_declaration<T>()();
+        constexpr auto number_str = constexpr_to_string_constant(N);
+        retval.variable_suffix += '[';
+        retval.variable_suffix += number_str.data();
+        retval.variable_suffix += ']';
+        return retval;
+    }
+};
+
+template <typename T, std::size_t Width, std::size_t Height>
+struct Get_output_type_declaration<math::Matrix<Width, Height, T>>
+{
+    Output_type_declaration operator()() const
+    {
+        constexpr auto width_str = constexpr_to_string_constant(Width);
+        constexpr auto height_str = constexpr_to_string_constant(Height);
+        Output_type_declaration retval = Get_output_type_declaration<T>()();
+        retval.type =
+            "math::Matrix<"
+            + (width_str.data() + (", " + (height_str.data() + (", " + std::move(retval.type)))))
+            + '>';
+        return retval;
+    }
+};
 }
 
 int main(int argc, char **argv)
 {
     Arena arena;
     expression::Nodes nodes;
-    constexpr std::size_t input_size = 16;
+    constexpr std::size_t layer_count = 3;
+    constexpr std::size_t unit_size = 8;
+    static_assert(layer_count >= 2, "");
+    constexpr std::size_t input_size = constexpr_pow(unit_size, layer_count - 1);
     typedef Expression_row_vector<input_size> Input_vector;
-    constexpr std::size_t hidden1_size = 16;
-    constexpr std::size_t hidden2_size = 16;
-    constexpr std::size_t output_size = 16;
+    constexpr std::size_t unit_count = input_size / unit_size;
+    typedef Expression_row_vector<unit_size> Unit_input_output_vector;
+    constexpr std::size_t unit_hidden_size = 2 * unit_size + 1;
+    typedef Expression_matrix<unit_hidden_size, unit_size> Unit_input_to_hidden_matrix;
+    typedef Expression_matrix<unit_size, unit_hidden_size> Unit_hidden_to_output_matrix;
+    constexpr std::size_t output_size = 1;
     typedef Expression_row_vector<output_size> Output_vector;
     const auto input =
         make_row_vector_variable(arena, nodes, "input", static_cast<const Input_vector *>(nullptr));
     const auto correct_output = make_row_vector_variable(
         arena, nodes, "correct_output", static_cast<const Output_vector *>(nullptr));
-    const auto t1 = make_matrix_variable<hidden1_size, input_size>(arena, nodes, "t1");
-    const auto t2 = make_matrix_variable<hidden2_size, hidden1_size>(arena, nodes, "t2");
-    const auto t3 = make_matrix_variable<output_size, hidden2_size>(arena, nodes, "t3");
-    const auto hidden1 = transfer_function(arena, nodes, input * t1);
-    const auto hidden2 = transfer_function(arena, nodes, hidden1 * t2);
-    const auto output = transfer_function(arena, nodes, hidden2 * t3);
+    Unit_input_to_hidden_matrix unit_input_to_hidden_matrixes[layer_count][unit_count];
+    Unit_hidden_to_output_matrix unit_hidden_to_output_matrixes[layer_count][unit_count];
+    auto layer_output = input;
+    for(std::size_t layer = 0; layer < layer_count; layer++)
+    {
+        static_assert(input_size % unit_size == 0, "");
+        auto layer_input = layer_output;
+        for(std::size_t unit = 0; unit < unit_count; unit++)
+        {
+            Unit_input_output_vector unit_input;
+            for(std::size_t i = 0; i < unit_size; i++)
+                unit_input[i] = layer_input[unit * unit_size + i]; // load with stride 1
+            auto &unit_input_to_hidden_matrix = unit_input_to_hidden_matrixes[layer][unit];
+            auto &unit_hidden_to_output_matrix = unit_hidden_to_output_matrixes[layer][unit];
+            {
+                std::ostringstream ss;
+                ss << "input_to_hidden[" << layer << "][" << unit << "]";
+                unit_input_to_hidden_matrix =
+                    make_matrix_variable(arena, nodes, ss.str(), &unit_input_to_hidden_matrix);
+            }
+            {
+                std::ostringstream ss;
+                ss << "hidden_to_output[" << layer << "][" << unit << "]";
+                unit_hidden_to_output_matrix =
+                    make_matrix_variable(arena, nodes, ss.str(), &unit_hidden_to_output_matrix);
+            }
+            auto unit_hidden =
+                transfer_function(arena, nodes, unit_input * unit_input_to_hidden_matrix);
+            auto unit_output =
+                transfer_function(arena, nodes, unit_hidden * unit_hidden_to_output_matrix);
+            for(std::size_t i = 0; i < unit_size; i++)
+                layer_output[unit + i * unit_count] =
+                    unit_output[i]; // apply butterfly permutation by storing with stride unit_count
+        }
+    }
+    static_assert(output_size <= unit_size * unit_count, "");
+    Output_vector output;
+    for(std::size_t i = 0; i < output_size; i++)
+        output[i] = layer_output[i];
     const auto output_difference = output - correct_output;
     const expression::Expression error_squared =
         output_difference * output_difference.get_transpose();
-    const auto t1_derivatives = get_derivative(error_squared, t1);
-    const auto t2_derivatives = get_derivative(error_squared, t2);
-    const auto t3_derivatives = get_derivative(error_squared, t3);
     expression::Expression_node::Code_writing_options code_writing_options;
     code_writing_options.indent = "    ";
-    code_writing_options.value_type = "float";
-    std::cout << "{\n";
+    code_writing_options.value_type = output_type_name;
+    std::string function_str =
+        "eval(" + Get_output_type_declaration<decltype(input)>()()("input") + ",\n    "
+        + Get_output_type_declaration<decltype(unit_input_to_hidden_matrixes)>()()(
+              "unit_input_to_hidden_matrixes")
+        + ",\n    " + Get_output_type_declaration<decltype(unit_hidden_to_output_matrixes)>()()(
+                          "unit_hidden_to_output_matrixes")
+        + ")";
+    std::ofstream os;
+    os.open("output_eval.h");
+    os << "constexpr " << Get_output_type_declaration<decltype(output)>()()(std::move(function_str));
+    os << "\n{\n    " << Get_output_type_declaration<decltype(output)>()()("output") << ";\n";
     {
         expression::Expression_node::Code_writing_state code_writing_state(code_writing_options);
-        write_code(std::cout, code_writing_state, arena, nodes, output);
-        write_variable_assignments(std::cout, code_writing_state, arena, nodes, "output", output);
+        write_code(os, code_writing_state, arena, nodes, output);
+        write_variable_assignments(os, code_writing_state, arena, nodes, "output", output);
     }
-    std::cout << "}\n{\n";
+    os << R"(    return output;
+}
+)";
+    os.close();
+    std::cout << "wrote eval" << std::endl;
+    Unit_input_to_hidden_matrix unit_input_to_hidden_derivative_matrixes[layer_count][unit_count];
+    Unit_hidden_to_output_matrix unit_hidden_to_output_derivative_matrixes[layer_count][unit_count];
+    for(std::size_t layer = 0; layer < layer_count; layer++)
+    {
+        for(std::size_t unit = 0; unit < unit_count; unit++)
+        {
+            unit_input_to_hidden_derivative_matrixes[layer][unit] =
+                get_derivative(error_squared, unit_input_to_hidden_matrixes[layer][unit]);
+            unit_hidden_to_output_derivative_matrixes[layer][unit] =
+                get_derivative(error_squared, unit_hidden_to_output_matrixes[layer][unit]);
+        }
+    }
+    os.open("output_learn.h");
+    os << "{\n";
     {
         expression::Expression_node::Code_writing_state code_writing_state(code_writing_options);
-        write_code(std::cout, code_writing_state, arena, nodes, t1_derivatives);
-        write_code(std::cout, code_writing_state, arena, nodes, t2_derivatives);
-        write_code(std::cout, code_writing_state, arena, nodes, t3_derivatives);
-        write_variable_assignments(
-            std::cout, code_writing_state, arena, nodes, "t1_derivatives", t1_derivatives);
-        write_variable_assignments(
-            std::cout, code_writing_state, arena, nodes, "t2_derivatives", t2_derivatives);
-        write_variable_assignments(
-            std::cout, code_writing_state, arena, nodes, "t3_derivatives", t3_derivatives);
+        for(std::size_t layer = 0; layer < layer_count; layer++)
+        {
+            for(std::size_t unit = 0; unit < unit_count; unit++)
+            {
+                write_code(os,
+                           code_writing_state,
+                           arena,
+                           nodes,
+                           unit_input_to_hidden_derivative_matrixes[layer][unit]);
+                write_code(os,
+                           code_writing_state,
+                           arena,
+                           nodes,
+                           unit_hidden_to_output_derivative_matrixes[layer][unit]);
+            }
+        }
+        for(std::size_t layer = 0; layer < layer_count; layer++)
+        {
+            for(std::size_t unit = 0; unit < unit_count; unit++)
+            {
+                {
+                    std::ostringstream ss;
+                    ss << "input_to_hidden_derivatives[" << layer << "][" << unit << "]";
+                    write_variable_assignments(
+                        os,
+                        code_writing_state,
+                        arena,
+                        nodes,
+                        ss.str(),
+                        unit_input_to_hidden_derivative_matrixes[layer][unit]);
+                }
+                {
+                    std::ostringstream ss;
+                    ss << "hidden_to_output_derivatives[" << layer << "][" << unit << "]";
+                    write_variable_assignments(
+                        os,
+                        code_writing_state,
+                        arena,
+                        nodes,
+                        ss.str(),
+                        unit_hidden_to_output_derivative_matrixes[layer][unit]);
+                }
+            }
+        }
     }
-    std::cout << "}\n";
+    os << "}" << std::endl;
+    os.close();
+    std::cout << "wrote learn" << std::endl;
 }
